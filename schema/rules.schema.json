@@ -1,0 +1,120 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/an4eetos/pr_reviews_to_skills/schema/rules.schema.json",
+  "title": "prrules output",
+  "description": "Code-review rules mined from a repository's pull-request discussions, scored by evidence.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "repo", "generated_at", "model", "stats", "rules"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "repo": { "type": "string", "description": "owner/name" },
+    "generated_at": { "type": "string", "format": "date-time" },
+    "model": { "type": "string" },
+    "stats": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["prs_scanned", "prs_with_discussion", "threads", "comments", "chunks", "candidates", "rules", "by_tier"],
+      "properties": {
+        "prs_scanned": { "type": "integer", "minimum": 0 },
+        "prs_with_discussion": { "type": "integer", "minimum": 0 },
+        "threads": { "type": "integer", "minimum": 0 },
+        "comments": { "type": "integer", "minimum": 0 },
+        "chunks": { "type": "integer", "minimum": 0 },
+        "candidates": { "type": "integer", "minimum": 0 },
+        "rules": { "type": "integer", "minimum": 0 },
+        "by_tier": {
+          "type": "object",
+          "additionalProperties": { "type": "integer", "minimum": 0 }
+        }
+      }
+    },
+    "rules": {
+      "type": "array",
+      "description": "Sorted by tier (golden, conditional, consider, rejected), then confidence.",
+      "items": { "$ref": "#/$defs/rule" }
+    }
+  },
+  "$defs": {
+    "rule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "title", "rule", "rationale", "category", "kind", "tier", "confidence", "tier_reason",
+                   "applies_when", "scope", "examples", "metrics", "evidence"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9-]+$", "description": "Slug, unique within the file." },
+        "title": { "type": "string", "minLength": 1 },
+        "rule": { "type": "string", "minLength": 1, "description": "One imperative, checkable sentence." },
+        "rationale": { "type": "string" },
+        "category": {
+          "enum": ["architecture", "style", "naming", "correctness", "error-handling", "security", "performance",
+                   "testing", "api-design", "concurrency", "process", "recurring-mistake"]
+        },
+        "kind": { "enum": ["do", "dont", "prefer"] },
+        "tier": {
+          "enum": ["golden", "conditional", "consider", "rejected"],
+          "description": "golden: always follow. conditional: follow when applies_when holds. consider: weigh it, thin or contested evidence. rejected: only present with --keep-rejected."
+        },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "tier_reason": { "type": "string" },
+        "applies_when": { "type": "string", "description": "Empty when the rule always applies; required for conditional rules." },
+        "scope": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["paths", "languages"],
+          "properties": {
+            "paths": { "type": "array", "items": { "type": "string" }, "description": "Glob patterns; empty = repo-wide." },
+            "languages": { "type": "array", "items": { "type": "string" } }
+          }
+        },
+        "examples": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["bad", "good"],
+          "properties": { "bad": { "type": "string" }, "good": { "type": "string" } }
+        },
+        "metrics": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["distinct_prs", "distinct_reviewers", "maintainer_endorsed", "accepted", "disputed", "ignored",
+                       "opposing", "thumbs_up", "first_seen", "last_seen", "recent_share"],
+          "properties": {
+            "distinct_prs": { "type": "integer", "minimum": 0 },
+            "distinct_reviewers": { "type": "integer", "minimum": 0 },
+            "maintainer_endorsed": { "type": "boolean" },
+            "accepted": { "type": "integer", "minimum": 0 },
+            "disputed": { "type": "integer", "minimum": 0 },
+            "ignored": { "type": "integer", "minimum": 0 },
+            "opposing": { "type": "integer", "minimum": 0 },
+            "thumbs_up": { "type": "integer", "minimum": 0 },
+            "first_seen": { "type": "string", "format": "date-time" },
+            "last_seen": { "type": "string", "format": "date-time" },
+            "recent_share": { "type": "number", "minimum": 0, "maximum": 1, "description": "Share of evidence from the last 12 months." }
+          }
+        },
+        "evidence": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 5,
+          "description": "The strongest supporting review comments (maintainers and accepted outcomes first).",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["pr", "ref", "url", "author", "role", "date", "quote", "outcome"],
+            "properties": {
+              "pr": { "type": "integer", "minimum": 1 },
+              "ref": { "type": "string" },
+              "url": { "type": "string" },
+              "author": { "type": "string" },
+              "role": { "enum": ["maintainer", "contributor", "pr-author", "bot"] },
+              "date": { "type": "string", "format": "date-time" },
+              "quote": { "type": "string", "description": "Verbatim from the comment." },
+              "outcome": { "enum": ["accepted", "disputed", "ignored", "unclear"] },
+              "thumbs_up": { "type": "integer", "minimum": 0 }
+            }
+          }
+        }
+      }
+    }
+  }
+}
