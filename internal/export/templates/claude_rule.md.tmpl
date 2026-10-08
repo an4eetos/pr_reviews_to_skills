@@ -1,0 +1,23 @@
+{{- define "claude_rule.md.tmpl" -}}
+{{- if .Paths -}}
+---
+paths:
+{{- range .Paths}}
+  - {{yaml .}}
+{{- end}}
+---
+
+{{end -}}
+<!-- {{marker}} from {{.Label}} pull-request reviews ({{date .GeneratedAt}}). Do not edit; regenerate with `prrules export`. -->
+
+# {{.Heading}}
+
+These rules come from what reviewers repeatedly asked for in {{.Label}} pull requests.
+{{- range .Sections}}
+
+## {{.Title}}
+{{range .Rules}}
+- **{{oneline .Title}}**{{if $.ShowCategory}} [{{.Category}}]{{end}}: {{if .AppliesWhen}}When {{oneline .AppliesWhen}}: {{end}}{{oneline .Rule}}{{if .Rationale}} _Why:_ {{oneline .Rationale}}{{end}}
+{{- end}}
+{{- end}}
+{{end -}}

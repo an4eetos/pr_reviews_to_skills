@@ -5,6 +5,7 @@ package metrics
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,12 +18,16 @@ const recentWindow = 365 * 24 * time.Hour
 // evidence arguing against it.
 func Compute(support, opposing []rules.Evidence, now time.Time) rules.Metrics {
 	var m rules.Metrics
-	prs := map[int]bool{}
+	prs := map[string]bool{}
 	reviewers := map[string]bool{}
 	authors := map[string]bool{}
+	repos := map[string]bool{}
 	recent := 0
 	for _, e := range support {
-		prs[e.PR] = true
+		prs[e.Repo+"#"+strconv.Itoa(e.PR)] = true
+		if e.Repo != "" {
+			repos[e.Repo] = true
+		}
 		authors[strings.ToLower(e.Author)] = true
 		if e.Role != "pr-author" {
 			reviewers[strings.ToLower(e.Author)] = true
@@ -52,14 +57,19 @@ func Compute(support, opposing []rules.Evidence, now time.Time) rules.Metrics {
 		}
 	}
 	m.DistinctPRs = len(prs)
+	m.DistinctRepos = len(repos)
 	m.DistinctReviewers = len(reviewers)
 	if m.DistinctReviewers == 0 {
 		m.DistinctReviewers = len(authors)
 	}
 	seen := map[string]bool{}
 	for _, e := range opposing {
-		if !seen[e.Ref] {
-			seen[e.Ref] = true
+		key := e.URL
+		if key == "" {
+			key = e.Repo + "#" + e.Ref
+		}
+		if !seen[key] {
+			seen[key] = true
 			m.Opposing++
 		}
 	}
@@ -109,4 +119,17 @@ func ApplyFloors(tier rules.Tier, appliesWhen string, m rules.Metrics) (rules.Ti
 		return tier, ""
 	}
 	return tier, fmt.Sprintf("Downgraded from %s by evidence floor: %s.", orig, strings.Join(why, "; "))
+}
+
+// RepoFloor applies to combined (multi-repo) rule sets: a rule seen in only
+// one repo can't be a golden rule for all of them, so it becomes a rule
+// conditional on that repo.
+func RepoFloor(tier rules.Tier, appliesWhen string, repos []string) (rules.Tier, string, string) {
+	if tier != rules.TierGolden || len(repos) > 1 {
+		return tier, appliesWhen, ""
+	}
+	if strings.TrimSpace(appliesWhen) == "" && len(repos) == 1 {
+		appliesWhen = "In " + repos[0]
+	}
+	return rules.TierConditional, appliesWhen, "Downgraded from golden: seen in a single repository."
 }

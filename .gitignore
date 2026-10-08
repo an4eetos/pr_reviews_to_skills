@@ -36,3 +36,6 @@ go.work.sum
 .prrules/
 /prrules
 rules.json
+
+# prrules multi-repo output
+prrules-out/

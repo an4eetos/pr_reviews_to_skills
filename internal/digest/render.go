@@ -1,6 +1,8 @@
 package digest
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"regexp"
 	"strings"
@@ -92,6 +94,20 @@ func openTag(u Unit, part, parts int) string {
 	}
 	return fmt.Sprintf("<pr number=\"%d\" state=%q author=\"@%s\" updated=%q%s>\n",
 		u.PR, u.State, u.Author, u.UpdatedAt.Format("2006-01-02"), partAttr)
+}
+
+// ContentHash identifies a unit's reviewable content: title, description,
+// threads with their outcomes, reviews and comments. It leaves out the PR's
+// updatedAt and state, so a CI push, label edit or merge that leaves the
+// discussion unchanged does not make the PR look new.
+func ContentHash(u Unit) string {
+	header, blocks := renderBlocks(u)
+	h := sha256.New()
+	fmt.Fprintf(h, "%d\n%s", u.PR, header)
+	for _, b := range blocks {
+		h.Write([]byte(b))
+	}
+	return hex.EncodeToString(h.Sum(nil))[:16]
 }
 
 // Render renders a whole unit; RenderParts splits it to fit maxTokens.

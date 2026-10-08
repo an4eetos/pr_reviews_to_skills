@@ -8,7 +8,11 @@
   "required": ["schema_version", "repo", "generated_at", "model", "stats", "rules"],
   "properties": {
     "schema_version": { "const": 1 },
-    "repo": { "type": "string", "description": "owner/name" },
+    "repo": { "type": "string", "description": "owner/name; empty for a combined rule set" },
+    "repos": {
+      "type": "array", "items": { "type": "string" },
+      "description": "Combined (multi-repo) rule sets only: every repository the rules were mined from."
+    },
     "generated_at": { "type": "string", "format": "date-time" },
     "model": { "type": "string" },
     "stats": {
@@ -67,6 +71,10 @@
             "languages": { "type": "array", "items": { "type": "string" } }
           }
         },
+        "repos": {
+          "type": "array", "items": { "type": "string" },
+          "description": "Combined rule sets only: the repositories whose reviews back the rule."
+        },
         "examples": {
           "type": "object",
           "additionalProperties": false,
@@ -80,6 +88,7 @@
                        "opposing", "thumbs_up", "first_seen", "last_seen", "recent_share"],
           "properties": {
             "distinct_prs": { "type": "integer", "minimum": 0 },
+            "distinct_repos": { "type": "integer", "minimum": 0, "description": "Combined rule sets only." },
             "distinct_reviewers": { "type": "integer", "minimum": 0 },
             "maintainer_endorsed": { "type": "boolean" },
             "accepted": { "type": "integer", "minimum": 0 },
@@ -110,7 +119,8 @@
               "date": { "type": "string", "format": "date-time" },
               "quote": { "type": "string", "description": "Verbatim from the comment." },
               "outcome": { "enum": ["accepted", "disputed", "ignored", "unclear"] },
-              "thumbs_up": { "type": "integer", "minimum": 0 }
+              "thumbs_up": { "type": "integer", "minimum": 0 },
+              "repo": { "type": "string", "description": "Combined rule sets only." }
             }
           }
         }

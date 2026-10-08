@@ -39,6 +39,20 @@ type Estimate struct {
 
 func (e Estimate) Total() float64 { return e.ExtractUSD + e.SynthUSD }
 
+// Add sums two estimates for the same model (one per repo).
+func (e Estimate) Add(o Estimate) Estimate {
+	if e.Model == "" {
+		return o
+	}
+	e.Requests += o.Requests
+	e.InputTokens += o.InputTokens
+	e.OutputTokens += o.OutputTokens
+	e.ExtractUSD += o.ExtractUSD
+	e.SynthUSD += o.SynthUSD
+	e.KnownPrice = e.KnownPrice && o.KnownPrice
+	return e
+}
+
 func estimate(model string, reqs []llm.Request, ratio float64, batch bool) Estimate {
 	e := Estimate{Model: model, Requests: len(reqs), Batch: batch}
 	for _, q := range reqs {

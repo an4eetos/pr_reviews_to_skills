@@ -44,10 +44,43 @@ type item struct {
 	Members, Opposing                                         []string
 }
 
+func candidateItem(c rules.Candidate) item {
+	return item{
+		Kind: c.Kind, Title: c.Title, Statement: c.Statement, Rationale: c.Rationale,
+		AppliesWhen: c.AppliesWhen, Bad: c.BadExample, Good: c.GoodExample,
+		Paths: c.Paths, Languages: c.Languages, Members: []string{c.ID},
+	}
+}
+
+func (it item) rule(cat string) rules.Rule {
+	return rules.Rule{
+		Title: it.Title, Rule: it.Statement, Rationale: it.Rationale,
+		Category: cat, Kind: it.Kind, AppliesWhen: it.AppliesWhen,
+		Scope:    rules.Scope{Paths: orEmpty(it.Paths), Languages: orEmpty(it.Languages)},
+		Examples: rules.Examples{Bad: it.Bad, Good: it.Good},
+		Members:  it.Members, Opposing: it.Opposing,
+	}
+}
+
 func mergeSchema() json.RawMessage {
+	s := map[string]any{
+		"type":                 "object",
+		"additionalProperties": false,
+		"required":             []string{"rules", "discarded"},
+		"properties": map[string]any{
+			"rules":     map[string]any{"type": "array", "items": mergeRuleSchema()},
+			"discarded": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+		},
+	}
+	data, _ := json.Marshal(s)
+	return data
+}
+
+// mergeRuleSchema is one consolidated rule, shared by merge and fold.
+func mergeRuleSchema() map[string]any {
 	str := map[string]any{"type": "string"}
 	strList := map[string]any{"type": "array", "items": str}
-	rule := map[string]any{
+	return map[string]any{
 		"type":                 "object",
 		"additionalProperties": false,
 		"required": []string{"title", "rule", "rationale", "kind", "applies_when", "paths", "languages",
@@ -66,34 +99,25 @@ func mergeSchema() json.RawMessage {
 			"opposing":     strList,
 		},
 	}
-	s := map[string]any{
-		"type":                 "object",
-		"additionalProperties": false,
-		"required":             []string{"rules", "discarded"},
-		"properties": map[string]any{
-			"rules":     map[string]any{"type": "array", "items": rule},
-			"discarded": strList,
-		},
-	}
-	data, _ := json.Marshal(s)
-	return data
+}
+
+type mergeRule struct {
+	Title       string   `json:"title"`
+	Rule        string   `json:"rule"`
+	Rationale   string   `json:"rationale"`
+	Kind        string   `json:"kind"`
+	AppliesWhen string   `json:"applies_when"`
+	Paths       []string `json:"paths"`
+	Languages   []string `json:"languages"`
+	BadExample  string   `json:"bad_example"`
+	GoodExample string   `json:"good_example"`
+	Members     []string `json:"members"`
+	Opposing    []string `json:"opposing"`
 }
 
 type mergeOutput struct {
-	Rules []struct {
-		Title       string   `json:"title"`
-		Rule        string   `json:"rule"`
-		Rationale   string   `json:"rationale"`
-		Kind        string   `json:"kind"`
-		AppliesWhen string   `json:"applies_when"`
-		Paths       []string `json:"paths"`
-		Languages   []string `json:"languages"`
-		BadExample  string   `json:"bad_example"`
-		GoodExample string   `json:"good_example"`
-		Members     []string `json:"members"`
-		Opposing    []string `json:"opposing"`
-	} `json:"rules"`
-	Discarded []string `json:"discarded"`
+	Rules     []mergeRule `json:"rules"`
+	Discarded []string    `json:"discarded"`
 }
 
 type MergeStats struct {
@@ -113,11 +137,7 @@ func Merge(ctx context.Context, opts Options, cands []rules.Candidate) ([]rules.
 	byCat := map[string][]item{}
 	for _, c := range cands {
 		byID[c.ID] = c
-		byCat[c.Category] = append(byCat[c.Category], item{
-			Kind: c.Kind, Title: c.Title, Statement: c.Statement, Rationale: c.Rationale,
-			AppliesWhen: c.AppliesWhen, Bad: c.BadExample, Good: c.GoodExample,
-			Paths: c.Paths, Languages: c.Languages, Members: []string{c.ID},
-		})
+		byCat[c.Category] = append(byCat[c.Category], candidateItem(c))
 	}
 	var st MergeStats
 	var drafts []rules.Rule
@@ -132,13 +152,7 @@ func Merge(ctx context.Context, opts Options, cands []rules.Candidate) ([]rules.
 			return nil, st, err
 		}
 		for _, it := range merged {
-			drafts = append(drafts, rules.Rule{
-				Title: it.Title, Rule: it.Statement, Rationale: it.Rationale,
-				Category: cat, Kind: it.Kind, AppliesWhen: it.AppliesWhen,
-				Scope:    rules.Scope{Paths: orEmpty(it.Paths), Languages: orEmpty(it.Languages)},
-				Examples: rules.Examples{Bad: it.Bad, Good: it.Good},
-				Members:  it.Members, Opposing: it.Opposing,
-			})
+			drafts = append(drafts, it.rule(cat))
 		}
 		opts.logf("synthesize: %s: %d candidates -> %d rules", cat, len(items), len(merged))
 	}
@@ -184,7 +198,7 @@ func mergeCategory(ctx context.Context, opts Options, cat string, items []item, 
 			if err := llm.Decode(results[reqs[g].ID], &mo); err != nil {
 				return nil, err
 			}
-			next = append(next, applyMerge(grp, mo, st)...)
+			next = append(next, applyMerge(grp, mo, st, nil)...)
 		}
 		if len(groups) == 1 {
 			return next, nil
@@ -200,8 +214,9 @@ func mergeCategory(ctx context.Context, opts Options, cat string, items []item, 
 	return items, nil
 }
 
-// applyMerge maps the model's short local ids back to candidate IDs.
-func applyMerge(grp []item, mo mergeOutput, st *MergeStats) []item {
+// applyMerge maps the model's short local ids back to candidate IDs. Items
+// already marked in used (assigned elsewhere, e.g. by a fold) are skipped.
+func applyMerge(grp []item, mo mergeOutput, st *MergeStats, used []bool) []item {
 	local := func(id string) (int, bool) {
 		id = strings.Trim(strings.TrimSpace(id), "[]")
 		var n int
@@ -210,7 +225,9 @@ func applyMerge(grp []item, mo mergeOutput, st *MergeStats) []item {
 		}
 		return n - 1, true
 	}
-	used := make([]bool, len(grp))
+	if used == nil {
+		used = make([]bool, len(grp))
+	}
 	var out []item
 	for _, r := range mo.Rules {
 		it := item{

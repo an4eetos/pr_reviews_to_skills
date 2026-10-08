@@ -61,6 +61,8 @@ type Evidence struct {
 	Quote    string    `json:"quote"`
 	Outcome  string    `json:"outcome"`
 	ThumbsUp int       `json:"thumbs_up,omitempty"`
+	// Repo is set in combined (multi-repo) rule sets only.
+	Repo string `json:"repo,omitempty"`
 }
 
 // Candidate is a rule as extracted from a single chunk of PR discussions,
@@ -68,6 +70,7 @@ type Evidence struct {
 type Candidate struct {
 	ID          string     `json:"id"`
 	Chunk       string     `json:"chunk"`
+	Repo        string     `json:"repo,omitempty"`
 	Title       string     `json:"title"`
 	Statement   string     `json:"statement"`
 	Rationale   string     `json:"rationale"`
@@ -85,6 +88,7 @@ type Candidate struct {
 // model sees them and the tier floors are enforced against them.
 type Metrics struct {
 	DistinctPRs        int       `json:"distinct_prs"`
+	DistinctRepos      int       `json:"distinct_repos,omitempty"`
 	DistinctReviewers  int       `json:"distinct_reviewers"`
 	MaintainerEndorsed bool      `json:"maintainer_endorsed"`
 	Accepted           int       `json:"accepted"`
@@ -110,6 +114,7 @@ type Rule struct {
 	TierReason  string     `json:"tier_reason"`
 	AppliesWhen string     `json:"applies_when"`
 	Scope       Scope      `json:"scope"`
+	Repos       []string   `json:"repos,omitempty"`
 	Examples    Examples   `json:"examples"`
 	Metrics     Metrics    `json:"metrics"`
 	Evidence    []Evidence `json:"evidence"`

@@ -71,16 +71,29 @@ func AttachEvidence(drafts []rules.Rule, cands []rules.Candidate, now time.Time)
 		d := &drafts[i]
 		d.Evidence = collect(d.Members, byID)
 		d.Metrics = metrics.Compute(d.Evidence, collect(d.Opposing, byID), now)
+		d.Repos = nil
+		for _, e := range d.Evidence {
+			if e.Repo != "" && !slices.Contains(d.Repos, e.Repo) {
+				d.Repos = append(d.Repos, e.Repo)
+			}
+		}
+		slices.Sort(d.Repos)
 	}
 }
 
 func collect(ids []string, byID map[string]rules.Candidate) []rules.Evidence {
+	// Dedupe by comment URL: refs are only unique within one digest, and a
+	// comment can be cited again when its PR is re-extracted.
 	seen := map[string]bool{}
 	var out []rules.Evidence
 	for _, id := range ids {
 		for _, e := range byID[id].Evidence {
-			if !seen[e.Ref] {
-				seen[e.Ref] = true
+			key := e.URL
+			if key == "" {
+				key = e.Repo + "#" + e.Ref
+			}
+			if !seen[key] {
+				seen[key] = true
 				out = append(out, e)
 			}
 		}
@@ -89,15 +102,18 @@ func collect(ids []string, byID map[string]rules.Candidate) []rules.Evidence {
 }
 
 // Score grades drafts (which must already have evidence attached) per
-// category, then applies the evidence floors.
-func Score(ctx context.Context, opts Options, drafts []rules.Rule) ([]rules.Rule, error) {
+// category, then applies the evidence floors. When only is non-nil, just the
+// drafts with only[i] set are sent to the model; the others keep their tier
+// and only have the floors re-applied.
+func Score(ctx context.Context, opts Options, drafts []rules.Rule, only []bool) ([]rules.Rule, error) {
+	selected := func(i int) bool { return only == nil || only[i] }
 	schema := scoreSchema()
 	var reqs []llm.Request
 	reqRules := map[string][]int{} // request ID -> draft indexes, in prompt order
 	for _, cat := range rules.Categories {
 		var idxs []int
 		for i, d := range drafts {
-			if d.Category == cat {
+			if d.Category == cat && selected(i) {
 				idxs = append(idxs, i)
 			}
 		}
@@ -115,6 +131,9 @@ func Score(ctx context.Context, opts Options, drafts []rules.Rule) ([]rules.Rule
 			})
 			reqRules[id] = part
 		}
+	}
+	if len(reqs) > 0 {
+		opts.logf("synthesize: scoring %d rule(s) in %d request(s)", countSelected(drafts, selected), len(reqs))
 	}
 	results, err := opts.Runner.RunSync(ctx, reqs)
 	if err != nil {
@@ -149,7 +168,7 @@ func Score(ctx context.Context, opts Options, drafts []rules.Rule) ([]rules.Rule
 	}
 	for i := range out {
 		r := &out[i]
-		if !graded[i] || !slices.Contains(rules.Tiers, r.Tier) {
+		if selected(i) && (!graded[i] || !slices.Contains(rules.Tiers, r.Tier)) {
 			r.Tier = rules.TierConsider
 			r.Confidence = 0.3
 			r.TierReason = "The scorer returned no grade for this rule."
@@ -162,6 +181,16 @@ func Score(ctx context.Context, opts Options, drafts []rules.Rule) ([]rules.Rule
 		}
 	}
 	return out, nil
+}
+
+func countSelected(drafts []rules.Rule, selected func(int) bool) int {
+	n := 0
+	for i := range drafts {
+		if selected(i) {
+			n++
+		}
+	}
+	return n
 }
 
 func renderScored(n int, r rules.Rule) string {
@@ -181,6 +210,9 @@ func renderScored(n int, r rules.Rule) string {
 	fmt.Fprintf(&b, "    prs=%d reviewers=%d maintainer=%s accepted=%d disputed=%d ignored=%d opposing=%d first=%s last=%s recent=%.2f\n",
 		m.DistinctPRs, m.DistinctReviewers, maint, m.Accepted, m.Disputed, m.Ignored, m.Opposing,
 		month(m.FirstSeen), month(m.LastSeen), m.RecentShare)
+	if m.DistinctRepos > 0 {
+		fmt.Fprintf(&b, "    repos=%d (%s)\n", m.DistinctRepos, strings.Join(r.Repos, ", "))
+	}
 	return b.String()
 }
 

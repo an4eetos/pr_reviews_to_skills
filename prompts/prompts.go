@@ -10,5 +10,8 @@ var Extract string
 //go:embed merge.md
 var Merge string
 
+//go:embed fold.md
+var Fold string
+
 //go:embed score.md
 var Score string

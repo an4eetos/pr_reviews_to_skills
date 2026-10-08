@@ -136,36 +136,36 @@ type batchState struct {
 
 func (r *Runner) statePath() string { return filepath.Join(r.Dir, "batches.json") }
 
+// ErrPending is returned by Collect when batches are still processing after
+// maxWait; their IDs are saved, so a later Collect picks them up.
+var ErrPending = errors.New("batches still processing")
+
 // RunBatch submits pending requests through the Message Batches API, polls
 // until every batch ends, and collects results. Batch IDs are persisted
 // before polling, so a killed process resumes polling instead of
 // resubmitting.
 func (r *Runner) RunBatch(ctx context.Context, reqs []Request) (map[string]Result, error) {
-	results, pending := r.split(reqs)
-	var st batchState
-	if _, err := store.ReadJSON(r.statePath(), &st); err != nil {
-		return results, err
+	if _, err := r.Submit(ctx, reqs); err != nil {
+		return nil, err
 	}
+	return r.Collect(ctx, reqs, 0)
+}
 
-	inflight := map[string]bool{}
-	for _, b := range st.Batches {
-		if !b.Collected {
-			for _, id := range b.RequestIDs {
-				inflight[id] = true
-			}
-		}
+// Submit sends every request that has no stored result and is not already
+// in an uncollected batch. It returns how many requests it submitted.
+func (r *Runner) Submit(ctx context.Context, reqs []Request) (int, error) {
+	toSubmit, err := r.Unsent(reqs)
+	if err != nil {
+		return 0, err
 	}
-	var toSubmit []Request
-	for _, q := range pending {
-		if !inflight[q.ID] {
-			toSubmit = append(toSubmit, q)
-		}
+	st, err := r.loadState()
+	if err != nil {
+		return 0, err
 	}
-
 	for _, group := range groupForBatch(toSubmit) {
 		id, err := r.Client.SubmitBatch(ctx, group)
 		if err != nil {
-			return results, fmt.Errorf("submitting batch: %w", err)
+			return 0, fmt.Errorf("submitting batch: %w", err)
 		}
 		rec := batchRecord{ID: id, SubmittedAt: time.Now().UTC()}
 		for _, q := range group {
@@ -173,14 +173,63 @@ func (r *Runner) RunBatch(ctx context.Context, reqs []Request) (map[string]Resul
 		}
 		st.Batches = append(st.Batches, rec)
 		if err := store.WriteJSON(r.statePath(), st); err != nil {
-			return results, err
+			return 0, err
 		}
 		r.logf("llm: submitted batch %s with %d requests", id, len(group))
 	}
+	return len(toSubmit), nil
+}
 
+// Unsent returns the requests that have neither a stored result nor a place
+// in an uncollected batch: what the next Submit or RunSync would pay for.
+func (r *Runner) Unsent(reqs []Request) ([]Request, error) {
+	_, pending := r.split(reqs)
+	st, err := r.loadState()
+	if err != nil {
+		return nil, err
+	}
+	inflight := st.inflight()
+	var out []Request
+	for _, q := range pending {
+		if !inflight[q.ID] {
+			out = append(out, q)
+		}
+	}
+	return out, nil
+}
+
+// InFlight reports how many submitted batches have not been collected yet.
+func (r *Runner) InFlight() (int, error) {
+	st, err := r.loadState()
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, b := range st.Batches {
+		if !b.Collected {
+			n++
+		}
+	}
+	return n, nil
+}
+
+// Collect polls every uncollected batch, storing results as batches end,
+// until none is left or maxWait (0 = no limit) runs out, in which case it
+// returns what it has together with ErrPending. Only results for reqs are
+// returned.
+func (r *Runner) Collect(ctx context.Context, reqs []Request, maxWait time.Duration) (map[string]Result, error) {
+	results, _ := r.split(reqs)
+	st, err := r.loadState()
+	if err != nil {
+		return results, err
+	}
 	poll := r.PollInterval
 	if poll <= 0 {
 		poll = time.Minute
+	}
+	var deadline time.Time
+	if maxWait > 0 {
+		deadline = time.Now().Add(maxWait)
 	}
 	for {
 		open := 0
@@ -211,7 +260,6 @@ func (r *Runner) RunBatch(ctx context.Context, reqs []Request) (map[string]Resul
 					failed++
 					r.logf("llm: %s failed: %s", res.ID, res.Error)
 				}
-				// Only report results for requests in this run's set.
 				results[res.ID] = res
 			}
 			b.Collected = true
@@ -223,15 +271,27 @@ func (r *Runner) RunBatch(ctx context.Context, reqs []Request) (map[string]Resul
 		if open == 0 {
 			break
 		}
-		t := time.NewTimer(poll)
+		wait := poll
+		if !deadline.IsZero() {
+			left := time.Until(deadline)
+			if left <= 0 {
+				r.logf("llm: %d batch(es) still processing; the next run collects them", open)
+				return onlyWanted(results, reqs), ErrPending
+			}
+			wait = min(wait, left)
+		}
+		t := time.NewTimer(wait)
 		select {
 		case <-ctx.Done():
 			t.Stop()
-			return results, ctx.Err()
+			return onlyWanted(results, reqs), ctx.Err()
 		case <-t.C:
 		}
 	}
+	return onlyWanted(results, reqs), nil
+}
 
+func onlyWanted(results map[string]Result, reqs []Request) map[string]Result {
 	wanted := map[string]bool{}
 	for _, q := range reqs {
 		wanted[q.ID] = true
@@ -241,7 +301,25 @@ func (r *Runner) RunBatch(ctx context.Context, reqs []Request) (map[string]Resul
 			delete(results, id)
 		}
 	}
-	return results, nil
+	return results
+}
+
+func (r *Runner) loadState() (batchState, error) {
+	var st batchState
+	_, err := store.ReadJSON(r.statePath(), &st)
+	return st, err
+}
+
+func (st batchState) inflight() map[string]bool {
+	m := map[string]bool{}
+	for _, b := range st.Batches {
+		if !b.Collected {
+			for _, id := range b.RequestIDs {
+				m[id] = true
+			}
+		}
+	}
+	return m
 }
 
 func groupForBatch(reqs []Request) [][]Request {

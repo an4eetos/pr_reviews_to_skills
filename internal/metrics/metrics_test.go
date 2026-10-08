@@ -72,3 +72,16 @@ func TestApplyFloors(t *testing.T) {
 		}
 	}
 }
+
+func TestRepoFloor(t *testing.T) {
+	tier, when, note := RepoFloor(rules.TierGolden, "", []string{"o/a"})
+	if tier != rules.TierConditional || when != "In o/a" || note == "" {
+		t.Errorf("single repo: %s %q %q", tier, when, note)
+	}
+	if tier, when, note := RepoFloor(rules.TierGolden, "", []string{"o/a", "o/b"}); tier != rules.TierGolden || when != "" || note != "" {
+		t.Errorf("two repos: %s %q %q", tier, when, note)
+	}
+	if tier, _, note := RepoFloor(rules.TierConsider, "", []string{"o/a"}); tier != rules.TierConsider || note != "" {
+		t.Errorf("consider is untouched: %s %q", tier, note)
+	}
+}

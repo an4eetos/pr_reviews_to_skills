@@ -163,13 +163,96 @@ func TestFetchPaginatesAndCompletesNested(t *testing.T) {
 		t.Errorf("labels/files: %v %v", first.Labels, first.Files)
 	}
 
-	// A completed fetch is not repeated.
+	if !st.Watermark.Equal(now) {
+		t.Errorf("watermark %v, want newest updatedAt %v", st.Watermark, now)
+	}
+
+	// A completed fetch refreshes: one page query that stops at the
+	// watermark, and no new PRs stored.
+	opts := FetchOptions{Owner: "o", Name: "r", States: []string{"MERGED"}, PageSize: 20}
 	n := len(f.requests)
-	if _, err := c.Fetch(context.Background(), dir, FetchOptions{Owner: "o", Name: "r", States: []string{"MERGED"}, PageSize: 20}); err != nil {
+	st, err = c.Fetch(context.Background(), dir, opts)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if len(f.requests) != n {
-		t.Errorf("completed fetch re-queried GitHub")
+	if got := len(f.requests) - n; got != 2 { // page + the newest PR's extra threads page
+		t.Errorf("refresh made %d requests", got)
+	}
+	if st.Refresh != nil || st.LastRefresh.IsZero() {
+		t.Errorf("refresh state not finished: %+v", st)
+	}
+
+	// New activity: PR 101 is new and PR 98 was updated. Only those two (plus
+	// the PR sitting exactly at the old watermark) are fetched.
+	f.mu.Lock()
+	updated := pr(98, now.Add(2*time.Hour), false)
+	f.prs = []map[string]any{updated, pr(101, now.Add(time.Hour), false), f.prs[0], f.prs[1], f.prs[3], f.prs[4]}
+	f.mu.Unlock()
+	pages := st.Pages
+	st, err = c.Fetch(context.Background(), dir, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Pages != pages+1 || !st.Watermark.Equal(now.Add(2*time.Hour)) {
+		t.Fatalf("after refresh: %+v", st)
+	}
+	prs, _ = LoadAll(dir)
+	var got []int
+	for _, p := range prs[len(prs)-3:] {
+		got = append(got, p.Number)
+	}
+	if len(prs) != 9 || got[0] != 98 || got[1] != 101 || got[2] != 100 {
+		t.Errorf("refreshed PRs %v (total %d), want [98 101 100]", got, len(prs))
+	}
+}
+
+func TestRefreshResumesAfterInterruption(t *testing.T) {
+	f := &fakeGitHub{remaining: 5000}
+	for i := 0; i < 4; i++ {
+		f.prs = append(f.prs, pr(10-i, now.Add(-time.Duration(i)*time.Hour), false))
+	}
+	srv := httptest.NewServer(f.handler(t))
+	defer srv.Close()
+	var slept []time.Duration
+	c := newTestClient(srv, &slept)
+	dir := t.TempDir()
+	opts := FetchOptions{Owner: "o", Name: "r", States: []string{"MERGED"}, PageSize: 2}
+	if _, err := c.Fetch(context.Background(), dir, opts); err != nil {
+		t.Fatal(err)
+	}
+
+	// Three new PRs arrive; the refresh is cancelled after its first page.
+	f.mu.Lock()
+	f.prs = append([]map[string]any{pr(13, now.Add(3*time.Hour), false), pr(12, now.Add(2*time.Hour), false), pr(11, now.Add(time.Hour), false)}, f.prs...)
+	f.mu.Unlock()
+	ctx, cancel := context.WithCancel(context.Background())
+	c.Logf = func(format string, args ...any) {
+		if strings.HasPrefix(format, "fetch: refresh: %d PRs so far") {
+			cancel()
+		}
+	}
+	if _, err := c.Fetch(ctx, dir, opts); err == nil {
+		t.Fatal("want cancellation error")
+	}
+	st, _ := LoadState(dir)
+	if st.Refresh == nil || st.Refresh.PRs != 2 || !st.Watermark.Equal(now) {
+		t.Fatalf("interrupted state %+v", st)
+	}
+	c.Logf = nil
+	st, err := c.Fetch(context.Background(), dir, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Refresh != nil || !st.Watermark.Equal(now.Add(3*time.Hour)) {
+		t.Errorf("resumed state %+v", st)
+	}
+	prs, _ := LoadAll(dir)
+	seen := map[int]int{}
+	for _, p := range prs {
+		seen[p.Number]++
+	}
+	if seen[11] != 1 || seen[12] != 1 || seen[13] != 1 {
+		t.Errorf("refreshed PRs %v", seen)
 	}
 }
 

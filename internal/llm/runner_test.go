@@ -152,6 +152,37 @@ func TestRunBatchSubmitsPollsAndResumes(t *testing.T) {
 	}
 }
 
+func TestCollectMaxWaitLeavesBatchesPending(t *testing.T) {
+	f := newFake()
+	r := &Runner{Client: f, Dir: t.TempDir(), PollInterval: time.Hour}
+	if n, err := r.Submit(context.Background(), reqs("a", "b")); err != nil || n != 2 {
+		t.Fatalf("submit: %d %v", n, err)
+	}
+	f.polls["batch_1"] = -100 // keep it processing for a while
+	// The first poll sees the batch processing; maxWait runs out before the
+	// next one instead of sleeping the full poll interval.
+	start := time.Now()
+	res, err := r.Collect(context.Background(), reqs("a", "b"), 10*time.Millisecond)
+	if !errors.Is(err, ErrPending) || len(res) != 0 || time.Since(start) > time.Second {
+		t.Fatalf("collect: %v %v after %s", res, err, time.Since(start))
+	}
+	if n, _ := r.InFlight(); n != 1 {
+		t.Errorf("in flight %d", n)
+	}
+	// The next run collects without resubmitting.
+	f.polls["batch_1"] = 1
+	if n, err := r.Submit(context.Background(), reqs("a", "b")); err != nil || n != 0 {
+		t.Fatalf("resubmitted %d %v", n, err)
+	}
+	res, err = r.Collect(context.Background(), reqs("a", "b"), 10*time.Millisecond)
+	if err != nil || !res["a"].OK() || !res["b"].OK() || f.submitted != 1 {
+		t.Errorf("second collect: %+v %v, submitted %d", res, err, f.submitted)
+	}
+	if n, _ := r.InFlight(); n != 0 {
+		t.Errorf("in flight %d after collect", n)
+	}
+}
+
 func writeState(r *Runner, st batchState) error {
 	return store.WriteJSON(r.statePath(), st)
 }

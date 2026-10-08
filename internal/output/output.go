@@ -23,6 +23,7 @@ const (
 type Report struct {
 	SchemaVersion int          `json:"schema_version"`
 	Repo          string       `json:"repo"`
+	Repos         []string     `json:"repos,omitempty"` // combined rule sets: every source repo
 	GeneratedAt   time.Time    `json:"generated_at"`
 	Model         string       `json:"model"`
 	Stats         Stats        `json:"stats"`
@@ -141,8 +142,8 @@ func Validate(r Report) error {
 	if r.SchemaVersion != SchemaVersion {
 		errs = append(errs, fmt.Errorf("schema_version %d, want %d", r.SchemaVersion, SchemaVersion))
 	}
-	if r.Repo == "" {
-		errs = append(errs, errors.New("repo is empty"))
+	if r.Repo == "" && len(r.Repos) == 0 {
+		errs = append(errs, errors.New("repo and repos are both empty"))
 	}
 	ids := map[string]bool{}
 	for i, x := range r.Rules {

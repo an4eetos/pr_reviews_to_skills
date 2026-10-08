@@ -1,0 +1,56 @@
+{{- define "skill.md.tmpl" -}}
+---
+name: {{.Name}}
+description: {{yaml .Description}}
+---
+
+<!-- {{marker}} from {{.Label}} pull-request reviews ({{date .GeneratedAt}}). Do not edit; regenerate with `prrules export`. -->
+
+# {{.Label}} review rules
+
+These rules were mined from {{.Stats.PRsWithDiscussion}} {{.Label}} pull requests with review discussion. Each rule is backed by real review comments and graded by how consistently the team applies it:
+
+- **Golden**: firm team rules. Always follow them.
+- **Conditional**: follow them when the stated condition holds.
+- **Hints**: weaker or contested signals. Weigh them; don't enforce them.
+
+When writing code, apply the rules whose scope matches the files you touch. When reviewing, cite the rule ID. The quoted review comments behind every rule are in [reference/evidence.md](reference/evidence.md); read it when you need to justify a rule or judge how strictly it is applied.
+{{range .Sections}}
+## {{if eq .Tier "consider"}}Hints{{else}}{{tier .Tier}} rules{{end}}
+{{range .Categories}}
+### {{category .Category}}
+{{range .Rules}}
+#### {{oneline .Title}} (`{{.ID}}`)
+
+{{oneline .Rule}}
+{{if .AppliesWhen}}
+- When: {{oneline .AppliesWhen}}
+{{- end}}
+{{- if .Rationale}}
+- Why: {{oneline .Rationale}}
+{{- end}}
+{{- if .Scope.Paths}}
+- Paths: {{code .Scope.Paths}}
+{{- end}}
+{{- if .Scope.Languages}}
+- Languages: {{join .Scope.Languages ", "}}
+{{- end}}
+{{- if .Repos}}
+- Repos: {{join .Repos ", "}}
+{{- end}}
+{{- if .Examples.Bad}}
+
+Bad:
+
+{{fence (lang .Scope) .Examples.Bad}}
+{{- end}}
+{{- if .Examples.Good}}
+
+Good:
+
+{{fence (lang .Scope) .Examples.Good}}
+{{- end}}
+{{end}}
+{{- end}}
+{{- end}}
+{{- end -}}

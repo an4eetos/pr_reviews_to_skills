@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -21,45 +22,93 @@ import (
 
 var now = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 
-func ghServer(t *testing.T) *httptest.Server {
+// ghFake serves PRs whose discussion and updatedAt tests can change between
+// runs. URLs include the requested owner/name, so repos don't share comments.
+type ghFake struct {
+	mu  sync.Mutex
+	prs map[int]ghPR
+}
+
+type ghPR struct {
+	updated time.Time
+	body    string
+}
+
+func (f *ghFake) set(n int, updated time.Time, body string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.prs[n] = ghPR{updated, body}
+}
+
+func prNode(owner, name string, n int, p ghPR) map[string]any {
+	base := fmt.Sprintf("https://github.com/%s/%s/pull/%d", owner, name, n)
 	comment := func(id int, login, assoc, body string) map[string]any {
 		return map[string]any{
-			"id": fmt.Sprint(id), "url": fmt.Sprintf("https://github.com/o/r/pull/x#c%d", id), "body": body,
+			"id": fmt.Sprint(id), "url": fmt.Sprintf("%s#c%d", base, id), "body": body,
 			"createdAt": now.AddDate(0, -1, 0), "diffHunk": "@@ -1 +1 @@\n+return err",
 			"author": map[string]any{"login": login, "__typename": "User"}, "authorAssociation": assoc,
 			"thumbsUp": map[string]any{"totalCount": 0}, "thumbsDown": map[string]any{"totalCount": 0},
 		}
 	}
 	empty := map[string]any{"totalCount": 0, "pageInfo": map[string]any{"hasNextPage": false}, "nodes": []any{}}
-	var prs []any
-	for i := 1; i <= 3; i++ {
-		prs = append(prs, map[string]any{
-			"number": i, "title": fmt.Sprintf("PR %d", i), "body": "", "url": fmt.Sprintf("https://github.com/o/r/pull/%d", i),
-			"state": "MERGED", "merged": true, "createdAt": now, "updatedAt": now.Add(-time.Duration(i) * time.Hour),
-			"author": map[string]any{"login": "bob", "__typename": "User"}, "authorAssociation": "CONTRIBUTOR",
-			"labels": map[string]any{"nodes": []any{}}, "files": map[string]any{"totalCount": 1, "nodes": []any{map[string]any{"path": "internal/db/db.go"}}},
-			"reviews": empty, "comments": empty,
-			"reviewThreads": map[string]any{
-				"totalCount": 1, "pageInfo": map[string]any{"hasNextPage": false},
-				"nodes": []any{map[string]any{
-					"id": "t", "path": "internal/db/db.go", "line": 10, "isResolved": true, "isOutdated": true,
-					"comments": map[string]any{"totalCount": 2, "nodes": []any{
-						comment(i*10, fmt.Sprintf("maint%d", i), "MEMBER", "Wrap this error with context using %w."),
-						comment(i*10+1, "bob", "CONTRIBUTOR", "Done"),
-					}},
+	return map[string]any{
+		"number": n, "title": fmt.Sprintf("PR %d", n), "body": "", "url": base,
+		"state": "MERGED", "merged": true, "createdAt": now, "updatedAt": p.updated,
+		"author": map[string]any{"login": "bob", "__typename": "User"}, "authorAssociation": "CONTRIBUTOR",
+		"labels": map[string]any{"nodes": []any{}}, "files": map[string]any{"totalCount": 1, "nodes": []any{map[string]any{"path": "internal/db/db.go"}}},
+		"reviews": empty, "comments": empty,
+		"reviewThreads": map[string]any{
+			"totalCount": 1, "pageInfo": map[string]any{"hasNextPage": false},
+			"nodes": []any{map[string]any{
+				"id": "t", "path": "internal/db/db.go", "line": 10, "isResolved": true, "isOutdated": true,
+				"comments": map[string]any{"totalCount": 2, "nodes": []any{
+					comment(n*10, fmt.Sprintf("maint%d", n), "MEMBER", p.body),
+					comment(n*10+1, "bob", "CONTRIBUTOR", "Done"),
 				}},
-			},
-		})
+			}},
+		},
 	}
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+}
+
+func newGH(t *testing.T) (*httptest.Server, *ghFake) {
+	f := &ghFake{prs: map[int]ghPR{}}
+	for i := 1; i <= 3; i++ {
+		f.set(i, now.Add(-time.Duration(i)*time.Hour), "Wrap this error with context using %w.")
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Variables map[string]any `json:"variables"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Error(err)
+		}
+		owner, name := body.Variables["owner"].(string), body.Variables["name"].(string)
+		f.mu.Lock()
+		var nums []int
+		for n := range f.prs {
+			nums = append(nums, n)
+		}
+		sort.Slice(nums, func(i, j int) bool { return f.prs[nums[i]].updated.After(f.prs[nums[j]].updated) })
+		var nodes []any
+		for _, n := range nums {
+			nodes = append(nodes, prNode(owner, name, n, f.prs[n]))
+		}
+		f.mu.Unlock()
 		json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{
 			"rateLimit": map[string]any{"cost": 1, "remaining": 4999, "resetAt": now},
 			"repository": map[string]any{"pullRequests": map[string]any{
 				"pageInfo": map[string]any{"hasNextPage": false, "endCursor": "x"},
-				"nodes":    prs,
+				"nodes":    nodes,
 			}},
 		}})
 	}))
+	t.Cleanup(srv.Close)
+	return srv, f
+}
+
+func ghServer(t *testing.T) *httptest.Server {
+	srv, _ := newGH(t)
+	return srv
 }
 
 // fakeLLM answers each stage by request ID prefix and also implements the
@@ -68,6 +117,10 @@ type fakeLLM struct {
 	mu      sync.Mutex
 	batches map[string][]llm.Request
 	calls   int
+	ids     []string
+	// hold keeps batches processing.
+	hold   bool
+	events []string
 }
 
 var refRe = regexp.MustCompile(`\[(\d+\.\d+)\] maintainer`)
@@ -75,9 +128,10 @@ var itemRe = regexp.MustCompile(`\[(i\d+)\]`)
 
 func (f *fakeLLM) answer(req llm.Request) llm.Result {
 	f.calls++
+	f.ids = append(f.ids, req.ID)
 	var out any
 	switch {
-	case strings.HasPrefix(req.ID, "chunk-"):
+	case strings.Contains(req.ID, "-chunk-"):
 		var ev []any
 		for _, m := range refRe.FindAllStringSubmatch(req.Prompt, -1) {
 			ev = append(ev, map[string]any{"ref": m[1], "quote": "Wrap this error with context", "outcome": "accepted"})
@@ -98,6 +152,12 @@ func (f *fakeLLM) answer(req llm.Request) llm.Result {
 			"kind": "do", "applies_when": "", "paths": []string{"internal/**"}, "languages": []string{"go"},
 			"bad_example": "return err", "good_example": "return fmt.Errorf(...)", "members": members, "opposing": []string{},
 		}}, "discarded": []string{}}
+	case strings.HasPrefix(req.ID, "fold-"):
+		var as []any
+		for _, m := range itemRe.FindAllStringSubmatch(req.Prompt, -1) {
+			as = append(as, map[string]any{"candidate": m[1], "rule": "R1", "relation": "member"})
+		}
+		out = map[string]any{"assignments": as, "new_rules": []any{}, "discarded": []string{}}
 	case strings.HasPrefix(req.ID, "score-"):
 		out = map[string]any{"scores": []any{map[string]any{
 			"id": "r1", "tier": "golden", "confidence": 0.9, "tier_reason": "Three maintainers, always applied.", "applies_when": "",
@@ -120,11 +180,15 @@ func (f *fakeLLM) SubmitBatch(_ context.Context, reqs []llm.Request) (string, er
 	defer f.mu.Unlock()
 	id := fmt.Sprintf("b%d", len(f.batches)+1)
 	f.batches[id] = reqs
+	f.events = append(f.events, "submit")
 	return id, nil
 }
 
 func (f *fakeLLM) BatchStatus(context.Context, string) (llm.BatchStatus, error) {
-	return llm.BatchStatus{Ended: true}, nil
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.events = append(f.events, "status")
+	return llm.BatchStatus{Ended: !f.hold}, nil
 }
 
 func (f *fakeLLM) BatchResults(_ context.Context, id string) ([]llm.Result, error) {
@@ -174,7 +238,7 @@ func TestRunEndToEnd(t *testing.T) {
 			if r.ID != "wrap-errors-with-context" || r.Tier != "golden" || r.Metrics.DistinctPRs != 3 || r.Metrics.DistinctReviewers != 3 || !r.Metrics.MaintainerEndorsed {
 				t.Errorf("rule %+v", r)
 			}
-			if len(r.Evidence) != 3 || !strings.HasPrefix(r.Evidence[0].URL, "https://github.com/o/r/pull/x#c") {
+			if len(r.Evidence) != 3 || !strings.HasPrefix(r.Evidence[0].URL, "https://github.com/o/r/pull/") {
 				t.Errorf("evidence %+v", r.Evidence)
 			}
 			if sync == (len(f.batches) > 0) {

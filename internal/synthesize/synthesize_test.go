@@ -112,7 +112,7 @@ func TestMergeAndScore(t *testing.T) {
 	}
 
 	AttachEvidence(drafts, cands, now)
-	scored, err := Score(context.Background(), opts, drafts)
+	scored, err := Score(context.Background(), opts, drafts, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,5 +166,103 @@ func TestHierarchicalMerge(t *testing.T) {
 	}
 	if len(drafts) != 1 || len(drafts[0].Members) != 8 {
 		t.Fatalf("drafts %+v", drafts)
+	}
+}
+
+func TestFoldAssignsNewCandidatesAndReportsTouched(t *testing.T) {
+	old := []rules.Candidate{
+		cand("c1", "error-handling", "Wrap errors", ev(1, "1.1", "alice", "maintainer", "accepted")),
+		cand("c2", "error-handling", "Never panic", ev(2, "2.1", "bob", "maintainer", "accepted")),
+		cand("c9", "error-handling", "Use sentinel errors", ev(9, "9.1", "carol", "contributor", "accepted")),
+	}
+	existing := []rules.Rule{
+		{Title: "Wrap errors", Rule: "Wrap errors.", Category: "error-handling", Kind: "do", Tier: rules.TierConsider, Confidence: 0.5, Members: []string{"c1"}},
+		{Title: "Never panic", Rule: "Never panic.", Category: "error-handling", Kind: "dont", Tier: rules.TierConsider, Confidence: 0.6, Members: []string{"c2"}},
+		{Title: "Use sentinel errors", Rule: "Use sentinel errors.", Category: "error-handling", Kind: "do", Tier: rules.TierConsider, Members: []string{"c9"}},
+	}
+	AttachEvidence(existing, old, now)
+
+	newCands := []rules.Candidate{
+		cand("c3", "error-handling", "Add context when wrapping", ev(3, "3.1", "dave", "maintainer", "accepted")),
+		cand("c4", "error-handling", "Log errors once", ev(4, "4.1", "erin", "maintainer", "accepted")),
+		cand("c5", "error-handling", "Be careful", ev(5, "5.1", "frank", "contributor", "unclear")),
+		cand("c6", "testing", "Use t.Helper", ev(6, "6.1", "gus", "maintainer", "accepted")),
+	}
+	// PR 9 was re-extracted and the sentinel-errors rule did not come back:
+	// c9 is gone from the candidate set.
+	all := append([]rules.Candidate{old[0], old[1]}, newCands...)
+
+	f := &fakeLLM{handle: func(req llm.Request) string {
+		switch {
+		case strings.HasPrefix(req.ID, "fold-error-handling"):
+			if !strings.Contains(req.Prompt, "[R1] (do) Wrap errors: Wrap errors.") || !strings.Contains(req.Prompt, "[i3] (do) Be careful") {
+				t.Errorf("fold prompt:\n%s", req.Prompt)
+			}
+			return mustJSON(map[string]any{
+				"assignments": []any{map[string]any{"candidate": "i1", "rule": "R1", "relation": "member"}},
+				"new_rules":   []any{rule("Log errors once", []string{"i2"}, []string{}, "")},
+				"discarded":   []string{"i3"},
+			})
+		case strings.HasPrefix(req.ID, "merge-testing"):
+			t.Errorf("a single new testing candidate needs no merge call")
+		}
+		return "{}"
+	}}
+	opts := Options{Runner: &llm.Runner{Client: f, Dir: t.TempDir(), Concurrency: 2}, Effort: "high"}
+	out, touched, st, err := Fold(context.Background(), opts, existing, newCands, all, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var titles []string
+	for _, r := range out {
+		titles = append(titles, r.Title)
+	}
+	if !slices.Equal(titles, []string{"Wrap errors", "Never panic", "Log errors once", "Use t.Helper"}) {
+		t.Fatalf("rules %v", titles)
+	}
+	if !slices.Equal(touched, []bool{true, false, true, true}) {
+		t.Errorf("touched %v", touched)
+	}
+	if !slices.Equal(out[0].Members, []string{"c1", "c3"}) || out[0].Metrics.DistinctPRs != 2 || out[0].Tier != rules.TierConsider {
+		t.Errorf("wrap rule %+v", out[0])
+	}
+	if st.Assigned != 1 || st.NewRules != 2 || st.Discarded != 1 || st.Dropped != 1 || st.Touched != 3 {
+		t.Errorf("stats %+v", st)
+	}
+
+	// The fold is cached: running it again makes no calls.
+	n := len(f.prompts)
+	if _, _, _, err := Fold(context.Background(), opts, existing, newCands, all, now); err != nil || len(f.prompts) != n {
+		t.Errorf("re-fold made %d calls (%v)", len(f.prompts)-n, err)
+	}
+}
+
+func TestScoreOnlySelected(t *testing.T) {
+	cands := []rules.Candidate{
+		cand("c1", "testing", "A", ev(1, "1.1", "a", "maintainer", "accepted")),
+		cand("c2", "testing", "B", ev(2, "2.1", "b", "maintainer", "accepted")),
+	}
+	drafts := []rules.Rule{
+		{Title: "A", Rule: "A.", Category: "testing", Kind: "do", Tier: rules.TierGolden, Confidence: 0.9, TierReason: "kept", Members: []string{"c1"}},
+		{Title: "B", Rule: "B.", Category: "testing", Kind: "do", Members: []string{"c2"}},
+	}
+	AttachEvidence(drafts, cands, now)
+	f := &fakeLLM{handle: func(req llm.Request) string {
+		if strings.Contains(req.Prompt, "(do) A:") {
+			t.Errorf("unselected rule sent to the scorer")
+		}
+		return mustJSON(map[string]any{"scores": []any{map[string]any{"id": "r1", "tier": "consider", "confidence": 0.4, "tier_reason": "thin", "applies_when": ""}}})
+	}}
+	opts := Options{Runner: &llm.Runner{Client: f, Dir: t.TempDir()}, Effort: "high"}
+	out, err := Score(context.Background(), opts, drafts, []bool{false, true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A keeps its stored grade but the single-PR floor still applies.
+	if out[0].TierReason == "kept" || out[0].Tier != rules.TierConditional && out[0].Tier != rules.TierConsider {
+		t.Errorf("A: %+v", out[0])
+	}
+	if out[1].Tier != rules.TierConsider || out[1].Confidence != 0.4 {
+		t.Errorf("B: %+v", out[1])
 	}
 }

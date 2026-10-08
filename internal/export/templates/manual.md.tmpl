@@ -1,0 +1,68 @@
+{{- define "manual.md.tmpl" -}}
+<!-- {{marker}} from {{.Label}} pull-request reviews ({{date .GeneratedAt}}). Do not edit; regenerate with `prrules export`. -->
+
+# {{.Label}} code review handbook
+
+This handbook collects what reviewers in {{.Label}} keep asking for in pull requests. Every rule is backed by quoted review comments, and its tier says how firmly the team applies it.
+
+Generated on {{date .GeneratedAt}} from {{.Stats.PRsScanned}} pull requests ({{.Stats.PRsWithDiscussion}} with review discussion){{if .Repos}} across {{join .Repos ", "}}{{end}}.
+
+| Tier | Rules | Meaning |
+|---|---|---|
+{{- range .Sections}}
+| {{tier .Tier}} | {{len .Rules}} | {{if eq .Tier "golden"}}Firm team rule, raised repeatedly by maintainers and consistently applied. Follow it.{{else if eq .Tier "conditional"}}Follow it when its condition holds.{{else if eq .Tier "consider"}}Reasonable, but the evidence is thin, contested or old. Weigh it.{{else}}Contradicted, obsolete or too vague. Listed for reference only.{{end}} |
+{{- end}}
+{{range .Sections}}
+- [{{tier .Tier}} rules](#{{anchor (printf "%s rules" (tier .Tier))}}) ({{len .Rules}})
+{{- range .Categories}}
+  - {{category .Category}}: {{len .Rules}}
+{{- end}}
+{{- end}}
+{{range .Sections}}
+## {{tier .Tier}} rules
+{{range .Categories}}
+### {{category .Category}}
+{{range .Rules}}
+#### {{oneline .Title}}
+
+`{{.ID}}` · confidence {{conf .Confidence}} · {{metrics .Metrics}}
+
+**Rule:** {{oneline .Rule}}
+{{if .AppliesWhen}}
+**Applies when:** {{oneline .AppliesWhen}}
+{{end}}
+{{- if .Rationale}}
+**Why:** {{oneline .Rationale}}
+{{end}}
+{{- if or .Scope.Paths .Scope.Languages}}
+**Scope:** {{if .Scope.Paths}}{{code .Scope.Paths}}{{else}}whole repo{{end}}{{if .Scope.Languages}} ({{join .Scope.Languages ", "}}){{end}}
+{{end}}
+{{- if .Repos}}
+**Repos:** {{join .Repos ", "}}
+{{end}}
+{{- if .TierReason}}
+**Grading:** {{oneline .TierReason}}
+{{end}}
+{{- if .Examples.Bad}}
+Instead of:
+
+{{fence (lang .Scope) .Examples.Bad}}
+{{end}}
+{{- if .Examples.Good}}
+Write:
+
+{{fence (lang .Scope) .Examples.Good}}
+{{end}}
+{{- if .Evidence}}
+<details><summary>What reviewers said ({{len .Evidence}})</summary>
+{{range .Evidence}}
+{{blockquote .Quote}}
+>
+> {{.Author}} ({{.Role}}{{if .Repo}}, {{.Repo}}{{end}}), [PR #{{.PR}}]({{.URL}}), {{date .Date}}, {{.Outcome}}
+{{end}}
+</details>
+{{end}}
+{{- end}}
+{{- end}}
+{{- end}}
+{{- end -}}
